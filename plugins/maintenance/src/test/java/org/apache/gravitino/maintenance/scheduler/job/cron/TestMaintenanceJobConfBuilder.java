@@ -22,16 +22,20 @@ import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.Map;
+import javax.annotation.Nullable;
 import org.apache.gravitino.Config;
 import org.apache.gravitino.maintenance.policy.MaintenanceAuthConfigs;
 import org.apache.gravitino.meta.AuditInfo;
 import org.apache.gravitino.meta.PolicyEntity;
 import org.apache.gravitino.policy.IcebergDataCompactionContent;
+import org.apache.gravitino.policy.IcebergSnapshotExpirationContent;
 import org.apache.gravitino.policy.Policy;
 import org.apache.gravitino.policy.PolicyContents;
 import org.apache.gravitino.utils.NamespaceUtil;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 class TestMaintenanceJobConfBuilder {
 
@@ -184,6 +188,63 @@ class TestMaintenanceJobConfBuilder {
     Assertions.assertEquals("2024-06-08 12:00:00Z", conf.get("older_than"));
   }
 
+  @ParameterizedTest
+  @CsvSource({
+    "30, 20, true, 2024-05-16 12:00:00Z, 20",
+    "5, 1, false, , ",
+    "30, 1, false, 2024-05-16 12:00:00Z, ",
+    "5, 20, false, , 20"
+  })
+  void testSnapshotExpirationMapsTypedRetention(
+      long days,
+      long retainLast,
+      boolean streamResults,
+      @Nullable String cutoff,
+      @Nullable String retained) {
+    PolicyEntity policy =
+        snapshotExpirationPolicy(
+            PolicyContents.icebergSnapshotExpiration(days, retainLast, streamResults));
+
+    Map<String, String> conf =
+        new MaintenanceJobConfBuilder(configWithUri(), Clock.fixed(FIXED, ZoneOffset.UTC))
+            .build(policy, "iceberg");
+
+    Assertions.assertEquals(cutoff, conf.get("older_than"));
+    Assertions.assertEquals(retained, conf.get("retain_last"));
+    Assertions.assertEquals(Boolean.toString(streamResults), conf.get("stream_results"));
+  }
+
+  @ParameterizedTest
+  @CsvSource({"0, 20, olderThanDays", "36501, 20, olderThanDays", "30, 0, retainLast"})
+  void testSnapshotExpirationRejectsInvalidRetention(long days, long retainLast, String field) {
+    PolicyEntity policy =
+        snapshotExpirationPolicy(PolicyContents.icebergSnapshotExpiration(days, retainLast, false));
+
+    IllegalArgumentException error =
+        Assertions.assertThrows(
+            IllegalArgumentException.class,
+            () ->
+                new MaintenanceJobConfBuilder(configWithUri(), Clock.fixed(FIXED, ZoneOffset.UTC))
+                    .build(policy, "iceberg"));
+    Assertions.assertTrue(error.getMessage().contains(field));
+  }
+
+  @Test
+  void testSnapshotExpirationDefaultsKeepExplicitJobOptions() {
+    Map<String, String> options =
+        Map.of("older_than", "2024-06-01 12:00:00Z", "retain_last", "10", "stream_results", "true");
+    PolicyEntity policy =
+        snapshotExpirationPolicy(
+            PolicyContents.icebergSnapshotExpiration(
+                null, null, null, null, null, null, options, Map.of()));
+
+    Map<String, String> conf =
+        new MaintenanceJobConfBuilder(configWithUri(), Clock.fixed(FIXED, ZoneOffset.UTC))
+            .build(policy, "iceberg");
+
+    options.forEach((key, value) -> Assertions.assertEquals(value, conf.get(key)));
+  }
+
   @Test
   void testMissingGravitinoUriFailsClosed() {
     PolicyEntity policy =
@@ -246,6 +307,18 @@ class TestMaintenanceJobConfBuilder {
     // Path metalake always comes from the policy namespace, never policy updaterOptions.
     Assertions.assertTrue(conf.get("updater_options").contains("\"metalake\":\"ml\""));
     Assertions.assertFalse(conf.get("updater_options").contains("policy-ml"));
+  }
+
+  private static PolicyEntity snapshotExpirationPolicy(IcebergSnapshotExpirationContent content) {
+    return PolicyEntity.builder()
+        .withId(POLICY_ID)
+        .withName("e")
+        .withNamespace(NamespaceUtil.ofPolicy("ml"))
+        .withPolicyType(Policy.BuiltInType.ICEBERG_SNAPSHOT_EXPIRATION)
+        .withEnabled(true)
+        .withContent(content)
+        .withAuditInfo(AuditInfo.builder().withCreator("t").withCreateTime(Instant.EPOCH).build())
+        .buildSkippingContentValidation();
   }
 
   private static Config configWithUri() {

@@ -86,6 +86,41 @@ class TestCommitJobSpecFactory {
   }
 
   @Test
+  void testForCommitPreservesTypedSnapshotRetention() {
+    PolicyEntity policy =
+        PolicyEntity.builder()
+            .withId(303L)
+            .withName("expire")
+            .withNamespace(NamespaceUtil.ofPolicy("ml"))
+            .withPolicyType(Policy.BuiltInType.ICEBERG_SNAPSHOT_EXPIRATION)
+            .withEnabled(true)
+            .withContent(
+                PolicyContents.icebergSnapshotExpiration(
+                    30L, 20L, true, null, true, null, Map.of(), Map.of()))
+            .withAuditInfo(
+                AuditInfo.builder().withCreator("test").withCreateTime(Instant.EPOCH).build())
+            .build();
+    MaintenanceJobSpec spec =
+        new CommitJobSpecFactory(configWithUri())
+            .forCommit(
+                List.of(
+                    new CommitChainMember(
+                        Policy.BuiltInType.ICEBERG_COMPACTION,
+                        compaction(202L),
+                        "rewrite_data_files"),
+                    new CommitChainMember(
+                        Policy.BuiltInType.ICEBERG_SNAPSHOT_EXPIRATION,
+                        policy,
+                        "expire_snapshots")),
+                new ResolvedTableRef(101L, "iceberg", "db.t"));
+
+    Map<String, String> jobConf = MaintenanceJobSpecFactory.jobConfForCommitChain(spec);
+    Assertions.assertNotNull(jobConf.get("older_than"));
+    Assertions.assertEquals("20", jobConf.get("retain_last"));
+    Assertions.assertEquals("true", jobConf.get("stream_results"));
+  }
+
+  @Test
   void testMergeSparkConfMapsMergesByKey() {
     Map<String, String> into = new HashMap<>();
     into.put("spark.executor.memory", "4g");

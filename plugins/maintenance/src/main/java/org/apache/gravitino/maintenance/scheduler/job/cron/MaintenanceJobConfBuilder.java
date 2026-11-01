@@ -41,6 +41,7 @@ import org.apache.gravitino.meta.PolicyEntity;
 import org.apache.gravitino.policy.ExecutablePolicyContent;
 import org.apache.gravitino.policy.IcebergDataCompactionContent;
 import org.apache.gravitino.policy.IcebergOrphanFileRemovalContent;
+import org.apache.gravitino.policy.IcebergSnapshotExpirationContent;
 import org.apache.gravitino.policy.PolicyContent;
 import org.apache.gravitino.policy.PolicyExecutionSpec;
 
@@ -61,7 +62,7 @@ import org.apache.gravitino.policy.PolicyExecutionSpec;
  */
 public final class MaintenanceJobConfBuilder {
 
-  private static final DateTimeFormatter ORPHAN_CUTOFF =
+  private static final DateTimeFormatter CLEANUP_CUTOFF =
       DateTimeFormatter.ofPattern("uuuu-MM-dd HH:mm:ssXXX").withZone(ZoneOffset.UTC);
 
   private static final String SPARK_SQL_CATALOG_PREFIX = "spark.sql.catalog.";
@@ -383,10 +384,28 @@ public final class MaintenanceJobConfBuilder {
       }
       return;
     }
+    if (content instanceof IcebergSnapshotExpirationContent) {
+      IcebergSnapshotExpirationContent expiration = (IcebergSnapshotExpirationContent) content;
+      IcebergSnapshotExpirationContent.validateOlderThanDays(expiration.olderThanDays());
+      IcebergSnapshotExpirationContent.validateRetainLast(expiration.retainLast());
+      // Keep default retention implicit so table properties and explicit job options still apply.
+      if (expiration.olderThanDays() != IcebergSnapshotExpirationContent.DEFAULT_OLDER_THAN_DAYS) {
+        jobConf.put("older_than", cleanupCutoff(expiration.olderThanDays()));
+      }
+      if (expiration.retainLast() != IcebergSnapshotExpirationContent.DEFAULT_RETAIN_LAST) {
+        jobConf.put("retain_last", Long.toString(expiration.retainLast()));
+      }
+      if (expiration.streamResults()) {
+        jobConf.put("stream_results", "true");
+      } else {
+        jobConf.putIfAbsent("stream_results", "false");
+      }
+      return;
+    }
     if (content instanceof IcebergOrphanFileRemovalContent) {
       IcebergOrphanFileRemovalContent orphan = (IcebergOrphanFileRemovalContent) content;
       IcebergOrphanFileRemovalContent.validateOlderThanDays(orphan.olderThanDays());
-      jobConf.put("older_than", orphanCutoff(orphan.olderThanDays()));
+      jobConf.put("older_than", cleanupCutoff(orphan.olderThanDays()));
       jobConf.put("dry_run", Boolean.toString(orphan.dryRun()));
       if (orphan.location() != null) {
         jobConf.put("location", orphan.location());
@@ -394,9 +413,9 @@ public final class MaintenanceJobConfBuilder {
     }
   }
 
-  private String orphanCutoff(long days) {
+  private String cleanupCutoff(long days) {
     try {
-      return ORPHAN_CUTOFF.format(clock.instant().minus(days, ChronoUnit.DAYS));
+      return CLEANUP_CUTOFF.format(clock.instant().minus(days, ChronoUnit.DAYS));
     } catch (DateTimeException | ArithmeticException e) {
       throw new IllegalArgumentException(
           "olderThanDays cannot be represented as a cleanup timestamp", e);
